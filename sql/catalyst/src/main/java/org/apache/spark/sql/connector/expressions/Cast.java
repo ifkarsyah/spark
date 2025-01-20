@@ -17,9 +17,8 @@
 
 package org.apache.spark.sql.connector.expressions;
 
-import java.io.Serializable;
-
 import org.apache.spark.annotation.Evolving;
+import org.apache.spark.sql.internal.connector.ExpressionWithToString;
 import org.apache.spark.sql.types.DataType;
 
 /**
@@ -28,16 +27,32 @@ import org.apache.spark.sql.types.DataType;
  * @since 3.3.0
  */
 @Evolving
-public class Cast implements Expression, Serializable {
+public class Cast extends ExpressionWithToString {
   private Expression expression;
+
+  /**
+   * Original data type of given expression
+   */
+  private DataType expressionDataType;
+
+  /**
+   * Target data type, i.e. data type in which expression will be cast
+   */
   private DataType dataType;
 
+  @Deprecated
   public Cast(Expression expression, DataType dataType) {
+    this(expression, null, dataType);
+  }
+
+  public Cast(Expression expression, DataType expressionDataType, DataType targetDataType) {
     this.expression = expression;
-    this.dataType = dataType;
+    this.expressionDataType = expressionDataType;
+    this.dataType = targetDataType;
   }
 
   public Expression expression() { return expression; }
+  public DataType expressionDataType() { return expressionDataType; }
   public DataType dataType() { return dataType; }
 
   @Override

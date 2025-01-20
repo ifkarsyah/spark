@@ -16,7 +16,7 @@
  */
 package org.apache.spark.deploy.k8s.features
 
-import scala.collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 
 import com.google.common.net.InternetDomainName
 import io.fabric8.kubernetes.api.model.Service
@@ -40,6 +40,9 @@ class DriverServiceFeatureStepSuite extends SparkFunSuite {
   private val DRIVER_SERVICE_ANNOTATIONS = Map(
     "annotation1key" -> "annotation1value",
     "annotation2key" -> "annotation2value")
+  private val DRIVER_SERVICE_LABELS = Map(
+    "svclabel1key" -> "svclabel1value",
+    "svclabel2key" -> "svclabel2value")
 
   test("Headless service has a port for the driver RPC, the block manager and driver ui.") {
     val sparkConf = new SparkConf(false)
@@ -49,6 +52,7 @@ class DriverServiceFeatureStepSuite extends SparkFunSuite {
     val kconf = KubernetesTestConf.createDriverConf(
       sparkConf = sparkConf,
       labels = DRIVER_LABELS,
+      serviceLabels = DRIVER_SERVICE_LABELS,
       serviceAnnotations = DRIVER_SERVICE_ANNOTATIONS)
     val configurationStep = new DriverServiceFeatureStep(kconf)
     assert(configurationStep.configurePod(SparkPod.initialPod()) === SparkPod.initialPod())
@@ -85,6 +89,7 @@ class DriverServiceFeatureStepSuite extends SparkFunSuite {
   test("Ports should resolve to defaults in SparkConf and in the service.") {
     val kconf = KubernetesTestConf.createDriverConf(
       labels = DRIVER_LABELS,
+      serviceLabels = DRIVER_SERVICE_LABELS,
       serviceAnnotations = DRIVER_SERVICE_ANNOTATIONS)
     val configurationStep = new DriverServiceFeatureStep(kconf)
     val resolvedService = configurationStep
@@ -104,17 +109,18 @@ class DriverServiceFeatureStepSuite extends SparkFunSuite {
   }
 
   test("Long prefixes should switch to using a generated unique name.") {
+    val clock = new ManualClock()
     val sparkConf = new SparkConf(false)
       .set(KUBERNETES_NAMESPACE, "my-namespace")
-    val kconf = KubernetesTestConf.createDriverConf(
-      sparkConf = sparkConf,
-      resourceNamePrefix = Some(LONG_RESOURCE_NAME_PREFIX),
-      labels = DRIVER_LABELS)
-    val clock = new ManualClock()
 
     // Ensure that multiple services created at the same time generate unique names.
     val services = (1 to 10).map { _ =>
-      val configurationStep = new DriverServiceFeatureStep(kconf, clock = clock)
+      val kconf = KubernetesTestConf.createDriverConf(
+        sparkConf = sparkConf,
+        resourceNamePrefix = Some(LONG_RESOURCE_NAME_PREFIX),
+        labels = DRIVER_LABELS,
+        clock = clock)
+      val configurationStep = new DriverServiceFeatureStep(kconf)
       val serviceName = configurationStep
         .getAdditionalKubernetesResources()
         .head
@@ -125,11 +131,11 @@ class DriverServiceFeatureStepSuite extends SparkFunSuite {
       val hostAddress = configurationStep
         .getAdditionalPodSystemProperties()(DRIVER_HOST_ADDRESS.key)
 
-      (serviceName -> hostAddress)
-    }.toMap
+      Tuple3(kconf, serviceName, hostAddress)
+    }
 
     assert(services.size === 10)
-    services.foreach { case (name, address) =>
+    services.foreach { case (kconf, name, address) =>
       assert(!name.startsWith(kconf.resourceNamePrefix))
       assert(!address.startsWith(kconf.resourceNamePrefix))
       assert(InternetDomainName.isValid(address))
@@ -165,6 +171,7 @@ class DriverServiceFeatureStepSuite extends SparkFunSuite {
     val kconf = KubernetesTestConf.createDriverConf(
       sparkConf = sparkConf,
       labels = DRIVER_LABELS,
+      serviceLabels = DRIVER_SERVICE_LABELS,
       serviceAnnotations = DRIVER_SERVICE_ANNOTATIONS)
     val configurationStep = new DriverServiceFeatureStep(kconf)
     assert(configurationStep.configurePod(SparkPod.initialPod()) === SparkPod.initialPod())
@@ -183,6 +190,7 @@ class DriverServiceFeatureStepSuite extends SparkFunSuite {
     val kconf = KubernetesTestConf.createDriverConf(
       sparkConf = sparkConf,
       labels = DRIVER_LABELS,
+      serviceLabels = DRIVER_SERVICE_LABELS,
       serviceAnnotations = DRIVER_SERVICE_ANNOTATIONS)
     val configurationStep = new DriverServiceFeatureStep(kconf)
     assert(configurationStep.configurePod(SparkPod.initialPod()) === SparkPod.initialPod())
@@ -207,6 +215,7 @@ class DriverServiceFeatureStepSuite extends SparkFunSuite {
         val kconf = KubernetesTestConf.createDriverConf(
           sparkConf = sparkConf,
           labels = DRIVER_LABELS,
+          serviceLabels = DRIVER_SERVICE_LABELS,
           serviceAnnotations = DRIVER_SERVICE_ANNOTATIONS)
         val configurationStep = new DriverServiceFeatureStep(kconf)
         assert(configurationStep.configurePod(SparkPod.initialPod()) === SparkPod.initialPod())
@@ -233,6 +242,9 @@ class DriverServiceFeatureStepSuite extends SparkFunSuite {
     assert(service.getSpec.getClusterIP === "None")
     DRIVER_LABELS.foreach { case (k, v) =>
       assert(service.getSpec.getSelector.get(k) === v)
+    }
+    DRIVER_SERVICE_LABELS.foreach { case (k, v) =>
+      assert(service.getMetadata.getLabels.get(k) === v)
     }
     DRIVER_SERVICE_ANNOTATIONS.foreach { case (k, v) =>
       assert(service.getMetadata.getAnnotations.get(k) === v)

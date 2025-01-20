@@ -17,7 +17,6 @@
 
 import sys
 import warnings
-
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 import numpy as np
@@ -45,7 +44,7 @@ from pyspark.ml.util import (
     JavaMLReadable,
     GeneralJavaMLWritable,
     HasTrainingSummary,
-    SparkContext,
+    try_remote_attribute_relation,
 )
 from pyspark.ml.wrapper import JavaEstimator, JavaModel, JavaParams, JavaWrapper
 from pyspark.ml.common import inherit_doc, _java2py
@@ -83,7 +82,7 @@ class ClusteringSummary(JavaWrapper):
     .. versionadded:: 2.1.0
     """
 
-    @property  # type: ignore[misc]
+    @property
     @since("2.1.0")
     def predictionCol(self) -> str:
         """
@@ -91,15 +90,16 @@ class ClusteringSummary(JavaWrapper):
         """
         return self._call_java("predictionCol")
 
-    @property  # type: ignore[misc]
+    @property
     @since("2.1.0")
+    @try_remote_attribute_relation
     def predictions(self) -> DataFrame:
         """
         DataFrame produced by the model's `transform` method.
         """
         return self._call_java("predictions")
 
-    @property  # type: ignore[misc]
+    @property
     @since("2.1.0")
     def featuresCol(self) -> str:
         """
@@ -107,7 +107,7 @@ class ClusteringSummary(JavaWrapper):
         """
         return self._call_java("featuresCol")
 
-    @property  # type: ignore[misc]
+    @property
     @since("2.1.0")
     def k(self) -> int:
         """
@@ -115,15 +115,16 @@ class ClusteringSummary(JavaWrapper):
         """
         return self._call_java("k")
 
-    @property  # type: ignore[misc]
+    @property
     @since("2.1.0")
+    @try_remote_attribute_relation
     def cluster(self) -> DataFrame:
         """
         DataFrame of predicted cluster centers for each training data point.
         """
         return self._call_java("cluster")
 
-    @property  # type: ignore[misc]
+    @property
     @since("2.1.0")
     def clusterSizes(self) -> List[int]:
         """
@@ -131,7 +132,7 @@ class ClusteringSummary(JavaWrapper):
         """
         return self._call_java("clusterSizes")
 
-    @property  # type: ignore[misc]
+    @property
     @since("2.4.0")
     def numIter(self) -> int:
         """
@@ -210,7 +211,7 @@ class GaussianMixtureModel(
         """
         return self._set(probabilityCol=value)
 
-    @property  # type: ignore[misc]
+    @property
     @since("2.0.0")
     def weights(self) -> List[float]:
         """
@@ -220,13 +221,15 @@ class GaussianMixtureModel(
         """
         return self._call_java("weights")
 
-    @property  # type: ignore[misc]
+    @property
     @since("3.0.0")
     def gaussians(self) -> List[MultivariateGaussian]:
         """
         Array of :py:class:`MultivariateGaussian` where gaussians[i] represents
         the Multivariate Gaussian (Normal) Distribution for Gaussian i
         """
+        from pyspark.core.context import SparkContext
+
         sc = SparkContext._active_spark_context
         assert sc is not None and self._java_obj is not None
 
@@ -236,7 +239,7 @@ class GaussianMixtureModel(
             for jgaussian in jgaussians
         ]
 
-    @property  # type: ignore[misc]
+    @property
     @since("2.0.0")
     def gaussiansDF(self) -> DataFrame:
         """
@@ -246,7 +249,7 @@ class GaussianMixtureModel(
         """
         return self._call_java("gaussiansDF")
 
-    @property  # type: ignore[misc]
+    @property
     @since("2.1.0")
     def summary(self) -> "GaussianMixtureSummary":
         """
@@ -529,7 +532,7 @@ class GaussianMixtureSummary(ClusteringSummary):
     .. versionadded:: 2.1.0
     """
 
-    @property  # type: ignore[misc]
+    @property
     @since("2.1.0")
     def probabilityCol(self) -> str:
         """
@@ -537,7 +540,7 @@ class GaussianMixtureSummary(ClusteringSummary):
         """
         return self._call_java("probabilityCol")
 
-    @property  # type: ignore[misc]
+    @property
     @since("2.1.0")
     def probability(self) -> DataFrame:
         """
@@ -545,7 +548,7 @@ class GaussianMixtureSummary(ClusteringSummary):
         """
         return self._call_java("probability")
 
-    @property  # type: ignore[misc]
+    @property
     @since("2.2.0")
     def logLikelihood(self) -> float:
         """
@@ -561,7 +564,7 @@ class KMeansSummary(ClusteringSummary):
     .. versionadded:: 2.1.0
     """
 
-    @property  # type: ignore[misc]
+    @property
     @since("2.4.0")
     def trainingCost(self) -> float:
         """
@@ -683,7 +686,7 @@ class KMeansModel(
         """Get the cluster centers, represented as a list of NumPy arrays."""
         return [c.toArray() for c in self._call_java("clusterCenters")]
 
-    @property  # type: ignore[misc]
+    @property
     @since("2.1.0")
     def summary(self) -> KMeansSummary:
         """
@@ -1021,7 +1024,7 @@ class BisectingKMeansModel(
         )
         return self._call_java("computeCost", dataset)
 
-    @property  # type: ignore[misc]
+    @property
     @since("2.1.0")
     def summary(self) -> "BisectingKMeansSummary":
         """
@@ -1245,7 +1248,7 @@ class BisectingKMeansSummary(ClusteringSummary):
     .. versionadded:: 2.1.0
     """
 
-    @property  # type: ignore[misc]
+    @property
     @since("3.0.0")
     def trainingCost(self) -> float:
         """

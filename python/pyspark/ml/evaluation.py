@@ -17,7 +17,6 @@
 
 import sys
 from abc import abstractmethod, ABCMeta
-
 from typing import Any, Dict, Optional, TYPE_CHECKING
 
 from pyspark import since, keyword_only
@@ -32,7 +31,7 @@ from pyspark.ml.param.shared import (
     HasWeightCol,
 )
 from pyspark.ml.common import inherit_doc
-from pyspark.ml.util import JavaMLReadable, JavaMLWritable
+from pyspark.ml.util import JavaMLReadable, JavaMLWritable, try_remote_evaluate
 from pyspark.sql.dataframe import DataFrame
 
 if TYPE_CHECKING:
@@ -129,6 +128,7 @@ class JavaEvaluator(JavaParams, Evaluator, metaclass=ABCMeta):
     implementations.
     """
 
+    @try_remote_evaluate
     def _evaluate(self, dataset: DataFrame) -> float:
         """
         Evaluates the output.

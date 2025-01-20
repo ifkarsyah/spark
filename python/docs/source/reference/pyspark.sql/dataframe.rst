@@ -25,9 +25,12 @@ DataFrame
 .. autosummary::
     :toctree: api/
 
+    DataFrame.__getattr__
+    DataFrame.__getitem__
     DataFrame.agg
     DataFrame.alias
     DataFrame.approxQuantile
+    DataFrame.asTable
     DataFrame.cache
     DataFrame.checkpoint
     DataFrame.coalesce
@@ -48,10 +51,13 @@ DataFrame
     DataFrame.distinct
     DataFrame.drop
     DataFrame.dropDuplicates
+    DataFrame.dropDuplicatesWithinWatermark
     DataFrame.drop_duplicates
     DataFrame.dropna
     DataFrame.dtypes
     DataFrame.exceptAll
+    DataFrame.executionInfo
+    DataFrame.exists
     DataFrame.explain
     DataFrame.fillna
     DataFrame.filter
@@ -60,6 +66,7 @@ DataFrame
     DataFrame.foreachPartition
     DataFrame.freqItems
     DataFrame.groupBy
+    DataFrame.groupingSets
     DataFrame.head
     DataFrame.hint
     DataFrame.inputFiles
@@ -70,13 +77,18 @@ DataFrame
     DataFrame.isStreaming
     DataFrame.join
     DataFrame.limit
+    DataFrame.lateralJoin
     DataFrame.localCheckpoint
     DataFrame.mapInPandas
     DataFrame.mapInArrow
+    DataFrame.metadataColumn
+    DataFrame.melt
     DataFrame.na
     DataFrame.observe
+    DataFrame.offset
     DataFrame.orderBy
     DataFrame.persist
+    DataFrame.plot
     DataFrame.printSchema
     DataFrame.randomSplit
     DataFrame.rdd
@@ -88,6 +100,7 @@ DataFrame
     DataFrame.sameSemantics
     DataFrame.sample
     DataFrame.sampleBy
+    DataFrame.scalar
     DataFrame.schema
     DataFrame.select
     DataFrame.selectExpr
@@ -102,25 +115,30 @@ DataFrame
     DataFrame.summary
     DataFrame.tail
     DataFrame.take
+    DataFrame.to
+    DataFrame.toArrow
     DataFrame.toDF
     DataFrame.toJSON
     DataFrame.toLocalIterator
     DataFrame.toPandas
-    DataFrame.to_pandas_on_spark
     DataFrame.transform
+    DataFrame.transpose
     DataFrame.union
     DataFrame.unionAll
     DataFrame.unionByName
     DataFrame.unpersist
+    DataFrame.unpivot
     DataFrame.where
     DataFrame.withColumn
     DataFrame.withColumns
     DataFrame.withColumnRenamed
+    DataFrame.withColumnsRenamed
     DataFrame.withMetadata
     DataFrame.withWatermark
     DataFrame.write
     DataFrame.writeStream
     DataFrame.writeTo
+    DataFrame.mergeInto
     DataFrame.pandas_api
     DataFrameNaFunctions.drop
     DataFrameNaFunctions.fill

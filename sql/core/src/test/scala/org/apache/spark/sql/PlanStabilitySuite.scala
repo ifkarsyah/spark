@@ -59,19 +59,17 @@ import org.apache.spark.tags.ExtendedSQLTest
  * To re-generate golden files for entire suite, run:
  * {{{
  *   SPARK_GENERATE_GOLDEN_FILES=1 build/sbt "sql/testOnly *PlanStability*Suite"
- *   SPARK_GENERATE_GOLDEN_FILES=1 SPARK_ANSI_SQL_MODE=true build/sbt "sql/testOnly *PlanStability*Suite"
+ *   SPARK_GENERATE_GOLDEN_FILES=1 SPARK_ANSI_SQL_MODE=false build/sbt "sql/testOnly *PlanStability*Suite"
  * }}}
  *
  * To re-generate golden file for a single test, run:
  * {{{
  *   SPARK_GENERATE_GOLDEN_FILES=1 build/sbt "sql/testOnly *PlanStability*Suite -- -z (tpcds-v1.4/q49)"
- *   SPARK_GENERATE_GOLDEN_FILES=1 SPARK_ANSI_SQL_MODE=true build/sbt "sql/testOnly *PlanStability*Suite -- -z (tpcds-v1.4/q49)"
+ *   SPARK_GENERATE_GOLDEN_FILES=1 SPARK_ANSI_SQL_MODE=false build/sbt "sql/testOnly *PlanStability*Suite -- -z (tpcds-v1.4/q49)"
  * }}}
  */
 // scalastyle:on line.size.limit
 trait PlanStabilitySuite extends DisableAdaptiveExecutionSuite {
-
-  private val regenerateGoldenFiles: Boolean = System.getenv("SPARK_GENERATE_GOLDEN_FILES") == "1"
 
   protected val baseResourcePath = {
     // use the same way as `SQLQueryTestSuite` to get the resource path
@@ -258,16 +256,22 @@ trait PlanStabilitySuite extends DisableAdaptiveExecutionSuite {
   protected def testQuery(tpcdsGroup: String, query: String, suffix: String = ""): Unit = {
     val queryString = resourceToString(s"$tpcdsGroup/$query.sql",
       classLoader = Thread.currentThread().getContextClassLoader)
-    val qe = sql(queryString).queryExecution
-    val plan = qe.executedPlan
-    val explain = normalizeLocation(normalizeIds(qe.explainString(FormattedMode)))
+    withSQLConf(
+      // Disable char/varchar read-side handling for better performance.
+      SQLConf.READ_SIDE_CHAR_PADDING.key -> "false",
+      SQLConf.LEGACY_NO_CHAR_PADDING_IN_PREDICATE.key -> "true",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "10MB") {
+      val qe = sql(queryString).queryExecution
+      val plan = qe.executedPlan
+      val explain = normalizeLocation(normalizeIds(qe.explainString(FormattedMode)))
 
-    assert(ValidateRequirements.validate(plan))
+      assert(ValidateRequirements.validate(plan))
 
-    if (regenerateGoldenFiles) {
-      generateGoldenFile(plan, query + suffix, explain)
-    } else {
-      checkWithApproved(plan, query + suffix, explain)
+      if (regenerateGoldenFiles) {
+        generateGoldenFile(plan, query + suffix, explain)
+      } else {
+        checkWithApproved(plan, query + suffix, explain)
+      }
     }
   }
 }

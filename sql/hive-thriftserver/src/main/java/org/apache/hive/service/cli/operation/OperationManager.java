@@ -39,16 +39,19 @@ import org.apache.hive.service.cli.TableSchema;
 import org.apache.hive.service.cli.session.HiveSession;
 import org.apache.hive.service.rpc.thrift.TRowSet;
 import org.apache.hive.service.rpc.thrift.TTableSchema;
-import org.apache.logging.log4j.core.appender.AbstractWriterAppender;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.apache.logging.log4j.core.Appender;
+
+import org.apache.spark.internal.SparkLogger;
+import org.apache.spark.internal.SparkLoggerFactory;
+import org.apache.spark.internal.LogKeys;
+import org.apache.spark.internal.MDC;
 
 /**
  * OperationManager.
  *
  */
 public class OperationManager extends AbstractService {
-  private static final Logger LOG = LoggerFactory.getLogger(OperationManager.class);
+  private static final SparkLogger LOG = SparkLoggerFactory.getLogger(OperationManager.class);
 
   private final Map<OperationHandle, Operation> handleToOperation =
       new HashMap<OperationHandle, Operation>();
@@ -82,7 +85,7 @@ public class OperationManager extends AbstractService {
 
   private void initOperationLogCapture(String loggingMode) {
     // Register another Appender (with the same layout) that talks to us.
-    AbstractWriterAppender ap = new LogDivertAppender(this, OperationLog.getLoggingLevel(loggingMode));
+    Appender ap = LogDivertAppender.create(this, OperationLog.getLoggingLevel(loggingMode));
     ((org.apache.logging.log4j.core.Logger)org.apache.logging.log4j.LogManager.getRootLogger()).addAppender(ap);
     ap.start();
   }
@@ -289,7 +292,8 @@ public class OperationManager extends AbstractService {
     for (OperationHandle handle : handles) {
       Operation operation = removeTimedOutOperation(handle);
       if (operation != null) {
-        LOG.warn("Operation " + handle + " is timed-out and will be closed");
+        LOG.warn("Operation {} is timed-out and will be closed",
+          MDC.of(LogKeys.OPERATION_HANDLE$.MODULE$, handle));
         removed.add(operation);
       }
     }

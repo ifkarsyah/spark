@@ -17,11 +17,14 @@
 
 package org.apache.spark.sql.execution.command
 
-import org.apache.spark.sql.catalyst.analysis.{AnalysisTest, UnresolvedTableOrView}
-import org.apache.spark.sql.catalyst.parser.CatalystSqlParser.parsePlan
-import org.apache.spark.sql.catalyst.plans.logical.DescribeRelation
+import org.apache.spark.sql.AnalysisException
+import org.apache.spark.sql.catalyst.analysis.{AnalysisTest, UnresolvedAttribute, UnresolvedTableOrView}
+import org.apache.spark.sql.catalyst.plans.logical.{DescribeColumn, DescribeRelation}
+import org.apache.spark.sql.test.SharedSparkSession
 
-class DescribeTableParserSuite extends AnalysisTest {
+class DescribeTableParserSuite extends SharedSparkSession with AnalysisTest {
+  private def parsePlan(statement: String) = spark.sessionState.sqlParser.parsePlan(statement)
+
   test("SPARK-17328: Fix NPE with EXPLAIN DESCRIBE TABLE") {
     comparePlans(parsePlan("describe t"),
       DescribeRelation(
@@ -35,5 +38,73 @@ class DescribeTableParserSuite extends AnalysisTest {
     comparePlans(parsePlan("describe table formatted t"),
       DescribeRelation(
         UnresolvedTableOrView(Seq("t"), "DESCRIBE TABLE", true), Map.empty, isExtended = true))
+  }
+
+  test("describe table column") {
+    comparePlans(parsePlan("DESCRIBE t col"),
+      DescribeColumn(
+        UnresolvedTableOrView(Seq("t"), "DESCRIBE TABLE", true),
+        UnresolvedAttribute(Seq("col")),
+        isExtended = false))
+    comparePlans(parsePlan("DESCRIBE t `abc.xyz`"),
+      DescribeColumn(
+        UnresolvedTableOrView(Seq("t"), "DESCRIBE TABLE", true),
+        UnresolvedAttribute(Seq("abc.xyz")),
+        isExtended = false))
+    comparePlans(parsePlan("DESCRIBE t abc.xyz"),
+      DescribeColumn(
+        UnresolvedTableOrView(Seq("t"), "DESCRIBE TABLE", true),
+        UnresolvedAttribute(Seq("abc", "xyz")),
+        isExtended = false))
+    comparePlans(parsePlan("DESCRIBE t `a.b`.`x.y`"),
+      DescribeColumn(
+        UnresolvedTableOrView(Seq("t"), "DESCRIBE TABLE", true),
+        UnresolvedAttribute(Seq("a.b", "x.y")),
+        isExtended = false))
+
+    comparePlans(parsePlan("DESCRIBE TABLE t col"),
+      DescribeColumn(
+        UnresolvedTableOrView(Seq("t"), "DESCRIBE TABLE", true),
+        UnresolvedAttribute(Seq("col")),
+        isExtended = false))
+    comparePlans(parsePlan("DESCRIBE TABLE EXTENDED t col"),
+      DescribeColumn(
+        UnresolvedTableOrView(Seq("t"), "DESCRIBE TABLE", true),
+        UnresolvedAttribute(Seq("col")),
+        isExtended = true))
+    comparePlans(parsePlan("DESCRIBE TABLE FORMATTED t col"),
+      DescribeColumn(
+        UnresolvedTableOrView(Seq("t"), "DESCRIBE TABLE", true),
+        UnresolvedAttribute(Seq("col")),
+        isExtended = true))
+
+    val error = intercept[AnalysisException](parsePlan("DESCRIBE EXTENDED t col AS JSON"))
+
+    checkError(
+      exception = error,
+      condition = "UNSUPPORTED_FEATURE.DESC_TABLE_COLUMN_JSON")
+
+    val sql = "DESCRIBE TABLE t PARTITION (ds='1970-01-01') col"
+    checkError(
+      exception = parseException(parsePlan)(sql),
+      condition = "UNSUPPORTED_FEATURE.DESC_TABLE_COLUMN_PARTITION",
+      parameters = Map.empty,
+      context = ExpectedContext(
+        fragment = sql,
+        start = 0,
+        stop = 47))
+  }
+
+  test("retain sql text position") {
+    val tbl = "unknown"
+    val sqlStatement = s"DESCRIBE TABLE $tbl"
+    val startPos = sqlStatement.indexOf(tbl)
+    assert(startPos != -1)
+    assertAnalysisErrorCondition(
+      parsePlan(sqlStatement),
+      "TABLE_OR_VIEW_NOT_FOUND",
+      Map("relationName" -> s"`$tbl`"),
+      Array(ExpectedContext(tbl, startPos, startPos + tbl.length - 1))
+    )
   }
 }

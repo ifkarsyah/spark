@@ -16,7 +16,7 @@
  */
 package org.apache.spark.deploy.k8s.features
 
-import scala.collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 
 import io.fabric8.kubernetes.api.model._
 
@@ -59,6 +59,7 @@ private[spark] class BasicExecutorFeatureStep(
   private val isDefaultProfile = resourceProfile.id == ResourceProfile.DEFAULT_RESOURCE_PROFILE_ID
   private val isPythonApp = kubernetesConf.get(APP_RESOURCE_TYPE) == Some(APP_RESOURCE_TYPE_PYTHON)
   private val disableConfigMap = kubernetesConf.get(KUBERNETES_EXECUTOR_DISABLE_CONFIGMAP)
+  private val minimumMemoryOverhead = kubernetesConf.get(EXECUTOR_MIN_MEMORY_OVERHEAD)
   private val memoryOverheadFactor = if (kubernetesConf.contains(EXECUTOR_MEMORY_OVERHEAD_FACTOR)) {
     kubernetesConf.get(EXECUTOR_MEMORY_OVERHEAD_FACTOR)
   } else {
@@ -68,6 +69,7 @@ private[spark] class BasicExecutorFeatureStep(
   val execResources = ResourceProfile.getResourcesForClusterManager(
     resourceProfile.id,
     resourceProfile.executorResources,
+    minimumMemoryOverhead,
     memoryOverheadFactor,
     kubernetesConf.sparkConf,
     isPythonApp,
@@ -122,68 +124,54 @@ private[spark] class BasicExecutorFeatureStep(
       buildExecutorResourcesQuantities(execResources.customResources.values.toSet)
 
     val executorEnv: Seq[EnvVar] = {
-        (Seq(
-          (ENV_DRIVER_URL, driverUrl),
-          (ENV_EXECUTOR_CORES, execResources.cores.get.toString),
-          (ENV_EXECUTOR_MEMORY, executorMemoryString),
-          (ENV_APPLICATION_ID, kubernetesConf.appId),
-          // This is to set the SPARK_CONF_DIR to be /opt/spark/conf
-          (ENV_SPARK_CONF_DIR, SPARK_CONF_DIR_INTERNAL),
-          (ENV_EXECUTOR_ID, kubernetesConf.executorId),
-          (ENV_RESOURCE_PROFILE_ID, resourceProfile.id.toString)
-        ) ++ kubernetesConf.environment).map { case (k, v) =>
-          new EnvVarBuilder()
-            .withName(k)
-            .withValue(v)
-            .build()
-        }
-      } ++ {
-        Seq(new EnvVarBuilder()
-          .withName(ENV_EXECUTOR_POD_IP)
-          .withValueFrom(new EnvVarSourceBuilder()
-            .withNewFieldRef("v1", "status.podIP")
-            .build())
-          .build())
-      } ++ {
-        Seq(new EnvVarBuilder()
-          .withName(ENV_EXECUTOR_POD_NAME)
-          .withValueFrom(new EnvVarSourceBuilder()
-            .withNewFieldRef("v1", "metadata.name")
-            .build())
-          .build())
-      } ++ {
-        if (kubernetesConf.get(AUTH_SECRET_FILE_EXECUTOR).isEmpty) {
-          Option(secMgr.getSecretKey()).map { authSecret =>
-            new EnvVarBuilder()
-              .withName(SecurityManager.ENV_AUTH_SECRET)
-              .withValue(authSecret)
-              .build()
-          }
-        } else None
-      } ++ {
-        kubernetesConf.get(EXECUTOR_CLASS_PATH).map { cp =>
-          new EnvVarBuilder()
-            .withName(ENV_CLASSPATH)
-            .withValue(cp)
-            .build()
-        }
-      } ++ {
-        val userOpts = kubernetesConf.get(EXECUTOR_JAVA_OPTIONS).toSeq.flatMap { opts =>
-          val subsOpts = Utils.substituteAppNExecIds(opts, kubernetesConf.appId,
-            kubernetesConf.executorId)
+      val sparkAuthSecret = Option(secMgr.getSecretKey()).map {
+        case authSecret: String if kubernetesConf.get(AUTH_SECRET_FILE_EXECUTOR).isEmpty =>
+          Seq(SecurityManager.ENV_AUTH_SECRET -> authSecret)
+        case _ => Nil
+      }.getOrElse(Nil)
+
+      val userOpts = kubernetesConf.get(EXECUTOR_JAVA_OPTIONS).toSeq.flatMap { opts =>
+        val subsOpts = Utils.substituteAppNExecIds(opts, kubernetesConf.appId,
+          kubernetesConf.executorId)
           Utils.splitCommandString(subsOpts)
-        }
-
-        val sparkOpts = Utils.sparkJavaOpts(kubernetesConf.sparkConf,
-          SparkConf.isExecutorStartupConf)
-
-        (userOpts ++ sparkOpts).zipWithIndex.map { case (opt, index) =>
-          new EnvVarBuilder()
-            .withName(s"$ENV_JAVA_OPT_PREFIX$index")
-            .withValue(opt)
-            .build()
-        }
       }
+
+      val sparkOpts = Utils.sparkJavaOpts(kubernetesConf.sparkConf,
+        SparkConf.isExecutorStartupConf)
+
+      val allOpts = (userOpts ++ sparkOpts).zipWithIndex.map { case (opt, index) =>
+        (s"$ENV_JAVA_OPT_PREFIX$index", opt)
+      }.toMap
+
+      val attributes = if (kubernetesConf.get(UI.CUSTOM_EXECUTOR_LOG_URL).isDefined) {
+        Map(
+          ENV_EXECUTOR_ATTRIBUTE_APP_ID -> kubernetesConf.appId,
+          ENV_EXECUTOR_ATTRIBUTE_EXECUTOR_ID -> kubernetesConf.executorId)
+      } else {
+        Map.empty[String, String]
+      }
+
+      KubernetesUtils.buildEnvVars(
+        Seq(
+          ENV_DRIVER_URL -> driverUrl,
+          ENV_EXECUTOR_CORES -> execResources.cores.get.toString,
+          ENV_EXECUTOR_MEMORY -> executorMemoryString,
+          ENV_APPLICATION_ID -> kubernetesConf.appId,
+          // This is to set the SPARK_CONF_DIR to be /opt/spark/conf
+          ENV_SPARK_CONF_DIR -> SPARK_CONF_DIR_INTERNAL,
+          ENV_EXECUTOR_ID -> kubernetesConf.executorId,
+          ENV_RESOURCE_PROFILE_ID -> resourceProfile.id.toString)
+          ++ attributes
+          ++ kubernetesConf.environment
+          ++ sparkAuthSecret
+          ++ Seq(ENV_CLASSPATH -> kubernetesConf.get(EXECUTOR_CLASS_PATH).orNull)
+          ++ allOpts) ++
+      KubernetesUtils.buildEnvVarsWithFieldRef(
+        Seq(
+          (ENV_EXECUTOR_POD_IP, "v1", "status.podIP"),
+          (ENV_EXECUTOR_POD_NAME, "v1", "metadata.name")
+        ))
+    }
     executorEnv.find(_.getName == ENV_EXECUTOR_DIRS).foreach { e =>
       e.setValue(e.getValue
         .replaceAll(ENV_APPLICATION_ID, kubernetesConf.appId)
@@ -224,7 +212,7 @@ private[spark] class BasicExecutorFeatureStep(
         .withValue(Utils.getCurrentUserName())
         .endEnv()
       .addAllToEnv(executorEnv.asJava)
-      .withPorts(requiredPorts.asJava)
+      .addAllToPorts(requiredPorts.asJava)
       .addToArgs("executor")
       .build()
     val executorContainerWithConfVolume = if (disableConfigMap) {
@@ -247,7 +235,7 @@ private[spark] class BasicExecutorFeatureStep(
           .build()
       }.getOrElse(executorContainerWithConfVolume)
     } else {
-      executorContainer
+      executorContainerWithConfVolume
     }
     val containerWithLifecycle =
       if (!kubernetesConf.workerDecommissioning) {
@@ -278,14 +266,12 @@ private[spark] class BasicExecutorFeatureStep(
       case "statefulset" => "Always"
       case _ => "Never"
     }
-    val annotations = kubernetesConf.annotations.map { case (k, v) =>
-      (k, Utils.substituteAppNExecIds(v, kubernetesConf.appId, kubernetesConf.executorId))
-    }
+
     val executorPodBuilder = new PodBuilder(pod.pod)
       .editOrNewMetadata()
         .withName(name)
         .addToLabels(kubernetesConf.labels.asJava)
-        .addToAnnotations(annotations.asJava)
+        .addToAnnotations(kubernetesConf.annotations.asJava)
         .addToOwnerReferences(ownerReference.toSeq: _*)
         .endMetadata()
       .editOrNewSpec()

@@ -19,7 +19,7 @@ package org.apache.spark.deploy.k8s.integrationtest
 import java.io.File
 import java.nio.charset.StandardCharsets
 
-import scala.collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 
 import com.google.common.io.Files
 import io.fabric8.kubernetes.api.model.Pod
@@ -34,26 +34,24 @@ import org.apache.spark.internal.config.PLUGINS
 private[spark] trait DecommissionSuite { k8sSuite: KubernetesSuite =>
 
   import DecommissionSuite._
-  import KubernetesSuite.k8sTestTag
+  import KubernetesSuite.{decomTestTag, k8sTestTag}
 
   def runDecommissionTest(f: () => Unit): Unit = {
     val logConfFilePath = s"${sparkHomeDir.toFile}/conf/log4j2.properties"
 
     try {
-      Files.write(
+      Files.asCharSink(new File(logConfFilePath), StandardCharsets.UTF_8).write(
         """rootLogger.level = info
           |rootLogger.appenderRef.stdout.ref = console
           |appender.console.type = Console
           |appender.console.name = console
           |appender.console.target = SYSTEM_OUT
           |appender.console.layout.type = PatternLayout
-          |appender.console.layout.pattern = %d{yy/MM/dd HH:mm:ss} %p %c{1}: %m%n%ex
+          |appender.console.layout.pattern = %d{HH:mm:ss.SSS} %p %c: %maxLen{%m}{512}%n%ex{8}%n
           |
           |logger.spark.name = org.apache.spark
           |logger.spark.level = debug
-      """.stripMargin,
-        new File(logConfFilePath),
-        StandardCharsets.UTF_8)
+      """.stripMargin)
 
       f()
     } finally {
@@ -61,7 +59,7 @@ private[spark] trait DecommissionSuite { k8sSuite: KubernetesSuite =>
     }
   }
 
-  test("Test basic decommissioning", k8sTestTag) {
+  test("Test basic decommissioning", k8sTestTag, decomTestTag) {
     runDecommissionTest(() => {
       sparkAppConf
         .set(config.DECOMMISSION_ENABLED.key, "true")
@@ -91,7 +89,7 @@ private[spark] trait DecommissionSuite { k8sSuite: KubernetesSuite =>
     })
   }
 
-  test("Test basic decommissioning with shuffle cleanup", k8sTestTag) {
+  test("Test basic decommissioning with shuffle cleanup", k8sTestTag, decomTestTag) {
     runDecommissionTest(() => {
       sparkAppConf
         .set(config.DECOMMISSION_ENABLED.key, "true")
@@ -122,7 +120,8 @@ private[spark] trait DecommissionSuite { k8sSuite: KubernetesSuite =>
     })
   }
 
-  test("Test decommissioning with dynamic allocation & shuffle cleanups", k8sTestTag) {
+  test("Test decommissioning with dynamic allocation & shuffle cleanups",
+      k8sTestTag, decomTestTag) {
     runDecommissionTest(() => {
       sparkAppConf
         .set(config.DECOMMISSION_ENABLED.key, "true")
@@ -155,7 +154,10 @@ private[spark] trait DecommissionSuite { k8sSuite: KubernetesSuite =>
             PatienceConfiguration.Timeout(Span(120, Seconds)),
             PatienceConfiguration.Interval(Span(1, Seconds))) {
 
-            val currentPod = client.pods().withName(pod.getMetadata.getName).get
+            val currentPod = client.pods()
+              .inNamespace(kubernetesTestComponents.namespace)
+              .withName(pod.getMetadata.getName)
+              .get
             val labels = currentPod.getMetadata.getLabels.asScala
 
             labels should not be (null)
@@ -171,7 +173,7 @@ private[spark] trait DecommissionSuite { k8sSuite: KubernetesSuite =>
         expectedDriverLogOnCompletion = Seq(
           "Finished waiting, stopping Spark",
           "Decommission executors",
-          "Remove reason statistics: (gracefully decommissioned: 1, decommision unfinished: 0, " +
+          "Remove reason statistics: (gracefully decommissioned: 1, decommission unfinished: 0, " +
             "driver killed: 0, unexpectedly exited: 0)."),
         appArgs = Array.empty[String],
         driverPodChecker = doBasicDriverPyPodCheck,
@@ -183,7 +185,7 @@ private[spark] trait DecommissionSuite { k8sSuite: KubernetesSuite =>
     })
   }
 
-  test("Test decommissioning timeouts", k8sTestTag) {
+  test("Test decommissioning timeouts", k8sTestTag, decomTestTag) {
     runDecommissionTest(() => {
       sparkAppConf
         .set(config.DECOMMISSION_ENABLED.key, "true")
@@ -216,7 +218,7 @@ private[spark] trait DecommissionSuite { k8sSuite: KubernetesSuite =>
     })
   }
 
-  test("SPARK-37576: Rolling decommissioning", k8sTestTag) {
+  test("SPARK-37576: Rolling decommissioning", k8sTestTag, decomTestTag) {
     runDecommissionTest(() => {
       sparkAppConf
         .set("spark.kubernetes.container.image", pyImage)

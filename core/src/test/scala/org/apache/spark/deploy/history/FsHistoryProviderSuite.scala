@@ -40,7 +40,6 @@ import org.scalatest.matchers.should.Matchers._
 import org.apache.spark.{JobExecutionStatus, SecurityManager, SPARK_VERSION, SparkConf, SparkFunSuite}
 import org.apache.spark.deploy.SparkHadoopUtil
 import org.apache.spark.deploy.history.EventLogTestHelper._
-import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config.DRIVER_LOG_DFS_DIR
 import org.apache.spark.internal.config.History._
 import org.apache.spark.internal.config.UI.{ADMIN_ACLS, ADMIN_ACLS_GROUPS, UI_VIEW_ACLS, UI_VIEW_ACLS_GROUPS, USER_GROUPS_MAPPING}
@@ -52,13 +51,13 @@ import org.apache.spark.status.AppStatusStore
 import org.apache.spark.status.KVUtils
 import org.apache.spark.status.KVUtils.KVStoreScalaSerializer
 import org.apache.spark.status.api.v1.{ApplicationAttemptInfo, ApplicationInfo}
+import org.apache.spark.status.protobuf.KVStoreProtobufSerializer
 import org.apache.spark.tags.ExtendedLevelDBTest
 import org.apache.spark.util.{Clock, JsonProtocol, ManualClock, Utils}
 import org.apache.spark.util.kvstore.InMemoryStore
 import org.apache.spark.util.logging.DriverLogger
 
-abstract class FsHistoryProviderSuite extends SparkFunSuite with Matchers with Logging
-  with PrivateMethodTester {
+abstract class FsHistoryProviderSuite extends SparkFunSuite with Matchers with PrivateMethodTester {
 
   private var testDir: File = null
 
@@ -76,6 +75,8 @@ abstract class FsHistoryProviderSuite extends SparkFunSuite with Matchers with L
   }
 
   protected def diskBackend: HybridStoreDiskBackend.Value
+
+  protected def serializer: LocalStoreSerializer.Value = LocalStoreSerializer.JSON
 
   /** Create a fake log file using the new log format used in Spark 1.3+ */
   private def newLogFile(
@@ -99,6 +100,17 @@ abstract class FsHistoryProviderSuite extends SparkFunSuite with Matchers with L
     testAppLogParsing(false, true)
   }
 
+  test("SPARK-41685: Verify the configurable serializer for history server") {
+    val conf = createTestConf()
+    val serializerOfKVStore = KVUtils.serializerForHistoryServer(conf)
+    assert(serializerOfKVStore.isInstanceOf[KVStoreScalaSerializer])
+    if (serializer == LocalStoreSerializer.JSON) {
+      assert(!serializerOfKVStore.isInstanceOf[KVStoreProtobufSerializer])
+    } else {
+      assert(serializerOfKVStore.isInstanceOf[KVStoreProtobufSerializer])
+    }
+  }
+
   private def testAppLogParsing(inMemory: Boolean, useHybridStore: Boolean = false): Unit = {
     val clock = new ManualClock(12345678)
     val conf = createTestConf(inMemory = inMemory, useHybridStore = useHybridStore)
@@ -114,8 +126,9 @@ abstract class FsHistoryProviderSuite extends SparkFunSuite with Matchers with L
 
     // Write a new-style application log.
     val newAppCompressedComplete = newLogFile("new1compressed", None, inProgress = false,
-      Some("lzf"))
-    writeFile(newAppCompressedComplete, Some(CompressionCodec.createCodec(conf, "lzf")),
+      Some(CompressionCodec.LZF))
+    writeFile(
+      newAppCompressedComplete, Some(CompressionCodec.createCodec(conf, CompressionCodec.LZF)),
       SparkListenerApplicationStart(newAppCompressedComplete.getName(), Some("new-complete-lzf"),
         1L, "test", None),
       SparkListenerApplicationEnd(4L))
@@ -233,7 +246,7 @@ abstract class FsHistoryProviderSuite extends SparkFunSuite with Matchers with L
       val fs = new Path(dir.getAbsolutePath).getFileSystem(hadoopConf)
       val provider = new FsHistoryProvider(conf)
 
-      val mergeApplicationListing = PrivateMethod[Unit]('mergeApplicationListing)
+      val mergeApplicationListing = PrivateMethod[Unit](Symbol("mergeApplicationListing"))
 
       val inProgressFile = newLogFile("app1", None, inProgress = true)
       val logAppender1 = new LogAppender("in-progress and final event log files does not exist")
@@ -695,7 +708,8 @@ abstract class FsHistoryProviderSuite extends SparkFunSuite with Matchers with L
       while (entry != null) {
         val actual = new String(ByteStreams.toByteArray(inputStream), StandardCharsets.UTF_8)
         val expected =
-          Files.toString(logs.find(_.getName == entry.getName).get, StandardCharsets.UTF_8)
+          Files.asCharSource(logs.find(_.getName == entry.getName).get, StandardCharsets.UTF_8)
+            .read()
         actual should be (expected)
         totalEntries += 1
         entry = inputStream.getNextEntry
@@ -776,7 +790,7 @@ abstract class FsHistoryProviderSuite extends SparkFunSuite with Matchers with L
   }
 
   test("provider correctly checks whether fs is in safe mode") {
-    val provider = spy(new FsHistoryProvider(createTestConf()))
+    val provider = spy[FsHistoryProvider](new FsHistoryProvider(createTestConf()))
     val dfs = mock(classOf[DistributedFileSystem])
     // Asserts that safe mode is false because we can't really control the return value of the mock,
     // since the API is different between hadoop 1 and 2.
@@ -1020,7 +1034,7 @@ abstract class FsHistoryProviderSuite extends SparkFunSuite with Matchers with L
     withTempDir { storeDir =>
       val conf = createTestConf().set(LOCAL_STORE_DIR, storeDir.getAbsolutePath())
       val clock = new ManualClock()
-      val provider = spy(new FsHistoryProvider(conf, clock))
+      val provider = spy[FsHistoryProvider](new FsHistoryProvider(conf, clock))
       val appId = "new1"
 
       // Write logs for two app attempts.
@@ -1100,13 +1114,13 @@ abstract class FsHistoryProviderSuite extends SparkFunSuite with Matchers with L
 
     provider.checkForLogs()
     provider.cleanLogs()
-    assert(new File(testDir.toURI).listFiles().size === logCount)
+    assert(new File(testDir.toURI).listFiles().length === logCount)
 
     // Move the clock forward 1 day and scan the files again. They should still be there.
     clock.advance(TimeUnit.DAYS.toMillis(1))
     provider.checkForLogs()
     provider.cleanLogs()
-    assert(new File(testDir.toURI).listFiles().size === logCount)
+    assert(new File(testDir.toURI).listFiles().length === logCount)
 
     // Update the slow app to contain valid info. Code should detect the change and not clean
     // it up.
@@ -1120,7 +1134,7 @@ abstract class FsHistoryProviderSuite extends SparkFunSuite with Matchers with L
     clock.advance(TimeUnit.DAYS.toMillis(2))
     provider.checkForLogs()
     provider.cleanLogs()
-    assert(new File(testDir.toURI).listFiles().size === validLogCount)
+    assert(new File(testDir.toURI).listFiles().length === validLogCount)
   }
 
   test("always find end event for finished apps") {
@@ -1184,11 +1198,11 @@ abstract class FsHistoryProviderSuite extends SparkFunSuite with Matchers with L
       SparkListenerApplicationStart("accessGranted", Some("accessGranted"), 1L, "test", None),
       SparkListenerApplicationEnd(5L))
     var isReadable = false
-    val mockedFs = spy(provider.fs)
+    val mockedFs = spy[FileSystem](provider.fs)
     doThrow(new AccessControlException("Cannot read accessDenied file")).when(mockedFs).open(
       argThat((path: Path) => path.getName.toLowerCase(Locale.ROOT) == "accessdenied" &&
         !isReadable))
-    val mockedProvider = spy(provider)
+    val mockedProvider = spy[FsHistoryProvider](provider)
     when(mockedProvider.fs).thenReturn(mockedFs)
     updateAndCheck(mockedProvider) { list =>
       list.size should be(1)
@@ -1213,7 +1227,7 @@ abstract class FsHistoryProviderSuite extends SparkFunSuite with Matchers with L
   test("check in-progress event logs absolute length") {
     val path = new Path("testapp.inprogress")
     val provider = new FsHistoryProvider(createTestConf())
-    val mockedProvider = spy(provider)
+    val mockedProvider = spy[FsHistoryProvider](provider)
     val mockedFs = mock(classOf[FileSystem])
     val in = mock(classOf[FSDataInputStream])
     val dfsIn = mock(classOf[DFSInputStream])
@@ -1401,12 +1415,12 @@ abstract class FsHistoryProviderSuite extends SparkFunSuite with Matchers with L
 
     provider.checkForLogs()
     // The invalid application log file would be cleaned by checkAndCleanLog().
-    assert(new File(testDir.toURI).listFiles().size === 1)
+    assert(new File(testDir.toURI).listFiles().length === 1)
 
     clock.advance(1)
     // cleanLogs() would clean the valid application log file.
     provider.cleanLogs()
-    assert(new File(testDir.toURI).listFiles().size === 0)
+    assert(new File(testDir.toURI).listFiles().length === 0)
   }
 
   private def assertOptionAfterSerde(opt: Option[Long], expected: Option[Long]): Unit = {
@@ -1543,8 +1557,8 @@ abstract class FsHistoryProviderSuite extends SparkFunSuite with Matchers with L
         SparkListenerJobStart(1, 0, Seq.empty)), rollFile = false)
       provider.checkForLogs()
       provider.cleanLogs()
-      assert(dir.listFiles().size === 1)
-      assert(provider.getListing.length === 1)
+      assert(dir.listFiles().length === 1)
+      assert(provider.getListing().length === 1)
 
       // Manually delete the appstatus file to make an invalid rolling event log
       val appStatusPath = RollingEventLogFilesWriter.getAppStatusFilePath(new Path(writer.logPath),
@@ -1552,7 +1566,7 @@ abstract class FsHistoryProviderSuite extends SparkFunSuite with Matchers with L
       fs.delete(appStatusPath, false)
       provider.checkForLogs()
       provider.cleanLogs()
-      assert(provider.getListing.length === 0)
+      assert(provider.getListing().length === 0)
 
       // Create a new application
       val writer2 = new RollingEventLogFilesWriter("app2", None, dir.toURI, conf, hadoopConf)
@@ -1564,14 +1578,14 @@ abstract class FsHistoryProviderSuite extends SparkFunSuite with Matchers with L
       // Both folders exist but only one application found
       provider.checkForLogs()
       provider.cleanLogs()
-      assert(provider.getListing.length === 1)
-      assert(dir.listFiles().size === 2)
+      assert(provider.getListing().length === 1)
+      assert(dir.listFiles().length === 2)
 
       // Make sure a new provider sees the valid application
       provider.stop()
       val newProvider = new FsHistoryProvider(conf)
       newProvider.checkForLogs()
-      assert(newProvider.getListing.length === 1)
+      assert(newProvider.getListing().length === 1)
     }
   }
 
@@ -1601,8 +1615,8 @@ abstract class FsHistoryProviderSuite extends SparkFunSuite with Matchers with L
 
       // The 1st checkForLogs should scan/update app2 only since it is newer than app1
       provider.checkForLogs()
-      assert(provider.getListing.length === 1)
-      assert(dir.listFiles().size === 2)
+      assert(provider.getListing().length === 1)
+      assert(dir.listFiles().length === 2)
       assert(provider.getListing().map(e => e.id).contains("app2"))
       assert(!provider.getListing().map(e => e.id).contains("app1"))
 
@@ -1616,8 +1630,8 @@ abstract class FsHistoryProviderSuite extends SparkFunSuite with Matchers with L
 
       // The 2nd checkForLogs should scan/update app3 only since it is newer than app1
       provider.checkForLogs()
-      assert(provider.getListing.length === 2)
-      assert(dir.listFiles().size === 3)
+      assert(provider.getListing().length === 2)
+      assert(dir.listFiles().length === 3)
       assert(provider.getListing().map(e => e.id).contains("app3"))
       assert(!provider.getListing().map(e => e.id).contains("app1"))
 
@@ -1642,8 +1656,8 @@ abstract class FsHistoryProviderSuite extends SparkFunSuite with Matchers with L
         SparkListenerJobStart(1, 0, Seq.empty)), rollFile = false)
       provider.checkForLogs()
       provider.cleanLogs()
-      assert(dir.listFiles().size === 1)
-      assert(provider.getListing.length === 1)
+      assert(dir.listFiles().length === 1)
+      assert(provider.getListing().length === 1)
 
       // Manually delete event log files and create event log file reader
       val eventLogDir = dir.listFiles().head
@@ -1707,6 +1721,61 @@ abstract class FsHistoryProviderSuite extends SparkFunSuite with Matchers with L
     provider.stop()
   }
 
+  test("SPARK-41447: Reduce the number of doMergeApplicationListing invocations") {
+    class TestFsHistoryProvider(conf: SparkConf, clock: Clock)
+      extends FsHistoryProvider(conf, clock) {
+      var doMergeApplicationListingCall = 0
+      override private[history] def doMergeApplicationListing(
+          reader: EventLogFileReader,
+          lastSeen: Long,
+          enableSkipToEnd: Boolean,
+          lastCompactionIndex: Option[Long]): Unit = {
+        super.doMergeApplicationListing(reader, lastSeen, enableSkipToEnd, lastCompactionIndex)
+        doMergeApplicationListingCall += 1
+      }
+    }
+
+    val maxAge = TimeUnit.SECONDS.toMillis(10)
+    val clock = new ManualClock(maxAge / 2)
+    val conf = createTestConf().set(MAX_LOG_AGE_S.key, s"${maxAge}ms").set(CLEANER_ENABLED, true)
+    val provider = new TestFsHistoryProvider(conf, clock)
+
+    val log1 = newLogFile("app1", Some("attempt1"), inProgress = false)
+    writeFile(log1, None,
+      SparkListenerApplicationStart("app1", Some("app1"), 1L, "test", Some("attempt1")),
+      SparkListenerApplicationEnd(2L)
+    )
+    log1.setLastModified(0L)
+
+    val log2 = newLogFile("app1", Some("attempt2"), inProgress = false)
+    writeFile(log2, None,
+      SparkListenerApplicationStart("app1", Some("app1"), 2L, "test", Some("attempt2")),
+      SparkListenerApplicationEnd(4L)
+    )
+    log2.setLastModified(clock.getTimeMillis())
+
+    val log3 = newLogFile("app2", Some("attempt1"), inProgress = false)
+    writeFile(log3, None,
+      SparkListenerApplicationStart("app2", Some("app1"), 3L, "test", Some("attempt1")),
+      SparkListenerApplicationEnd(4L)
+    )
+    log3.setLastModified(0L)
+
+    provider.getListing().size should be (0)
+
+    // Move the clock forward so log1 and log3 exceed the max age.
+    clock.advance(maxAge)
+    // Avoid unnecessary parse, the expired log files would be cleaned by checkForLogs().
+    provider.checkForLogs()
+
+    provider.doMergeApplicationListingCall should be (1)
+    provider.getListing().size should be (1)
+
+    assert(!log1.exists())
+    assert(!log3.exists())
+    assert(log2.exists())
+  }
+
   /**
    * Asks the provider to check for logs and calls a function to perform checks on the updated
    * app list. Example:
@@ -1757,6 +1826,7 @@ abstract class FsHistoryProviderSuite extends SparkFunSuite with Matchers with L
     }
     conf.set(HYBRID_STORE_ENABLED, useHybridStore)
     conf.set(HYBRID_STORE_DISK_BACKEND.key, diskBackend.toString)
+    conf.set(LOCAL_STORE_SERIALIZER.key, serializer.toString)
 
     conf
   }
@@ -1812,7 +1882,16 @@ class LevelDBBackendFsHistoryProviderSuite extends FsHistoryProviderSuite {
     HybridStoreDiskBackend.LEVELDB
 }
 
+@ExtendedLevelDBTest
+class LevelDBBackendWithProtobufSerializerSuite extends LevelDBBackendFsHistoryProviderSuite {
+  override protected def serializer: LocalStoreSerializer.Value = LocalStoreSerializer.PROTOBUF
+}
+
 class RocksDBBackendFsHistoryProviderSuite extends FsHistoryProviderSuite {
   override protected def diskBackend: HybridStoreDiskBackend.Value =
     HybridStoreDiskBackend.ROCKSDB
+}
+
+class RocksDBBackendWithProtobufSerializerSuite extends RocksDBBackendFsHistoryProviderSuite {
+  override protected def serializer: LocalStoreSerializer.Value = LocalStoreSerializer.PROTOBUF
 }

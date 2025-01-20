@@ -1,6 +1,6 @@
 -- timestamp_ntz literals and constructors
 --CONFIG_DIM1 spark.sql.timestampType=TIMESTAMP_LTZ
---CONFIG_DIM1 spark.sql.timestampType=TIMESTAMP_NTZ
+--CONFIG_DIM2 spark.sql.timestampType=TIMESTAMP_NTZ
 
 select timestamp_ntz'2016-12-31 00:12:00', timestamp_ntz'2016-12-31';
 
@@ -17,7 +17,7 @@ SELECT make_timestamp_ntz(2021, 07, 11, 6, 30, 45.678, 'CET');
 SELECT make_timestamp_ntz(2021, 07, 11, 6, 30, 60.007);
 
 SELECT convert_timezone('Europe/Moscow', 'America/Los_Angeles', timestamp_ntz'2022-01-01 00:00:00');
-SELECT convert_timezone('Europe/Amsterdam', timestamp_ntz'2022-03-23 00:00:00');
+SELECT convert_timezone('Europe/Brussels', timestamp_ntz'2022-03-23 00:00:00');
 
 -- Get the difference between timestamps w/o time zone in the specified units
 select timestampdiff(QUARTER, timestamp_ntz'2022-01-01 01:02:03', timestamp_ntz'2022-05-02 05:06:07');

@@ -45,10 +45,12 @@ trait ShowNamespacesSuiteBase extends command.ShowNamespacesSuiteBase {
   }
 
   test("IN namespace doesn't exist") {
-    val errMsg = intercept[AnalysisException] {
+    val e = intercept[AnalysisException] {
       sql("SHOW NAMESPACES in dummy")
-    }.getMessage
-    assert(errMsg.contains("Namespace 'dummy' not found"))
+    }
+    checkError(e,
+      condition = "SCHEMA_NOT_FOUND",
+      parameters = Map("schemaName" -> s"`$catalog`.`dummy`"))
   }
 }
 

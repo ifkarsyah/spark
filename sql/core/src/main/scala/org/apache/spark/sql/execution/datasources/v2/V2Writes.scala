@@ -17,21 +17,25 @@
 
 package org.apache.spark.sql.execution.datasources.v2
 
-import java.util.UUID
+import java.util.{Optional, UUID}
+
+import scala.jdk.CollectionConverters._
 
 import org.apache.spark.sql.catalyst.expressions.PredicateHelper
-import org.apache.spark.sql.catalyst.plans.logical.{AppendData, LogicalPlan, OverwriteByExpression, OverwritePartitionsDynamic, Project, ReplaceData}
+import org.apache.spark.sql.catalyst.plans.logical.{AppendData, LogicalPlan, OverwriteByExpression, OverwritePartitionsDynamic, Project, ReplaceData, WriteDelta}
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.streaming.InternalOutputModes._
+import org.apache.spark.sql.catalyst.types.DataTypeUtils
+import org.apache.spark.sql.catalyst.util.WriteDeltaProjections
 import org.apache.spark.sql.connector.catalog.{SupportsWrite, Table}
-import org.apache.spark.sql.connector.write.{LogicalWriteInfoImpl, SupportsDynamicOverwrite, SupportsOverwrite, SupportsTruncate, Write, WriteBuilder}
+import org.apache.spark.sql.connector.expressions.filter.Predicate
+import org.apache.spark.sql.connector.write.{DeltaWriteBuilder, LogicalWriteInfoImpl, SupportsDynamicOverwrite, SupportsOverwriteV2, SupportsTruncate, Write, WriteBuilder}
 import org.apache.spark.sql.errors.{QueryCompilationErrors, QueryExecutionErrors}
-import org.apache.spark.sql.execution.datasources.DataSourceStrategy
 import org.apache.spark.sql.execution.streaming.sources.{MicroBatchWrite, WriteToMicroBatchDataSource}
 import org.apache.spark.sql.internal.connector.SupportsStreamingUpdateAsAppend
-import org.apache.spark.sql.sources.{AlwaysTrue, Filter}
 import org.apache.spark.sql.streaming.OutputMode
 import org.apache.spark.sql.types.StructType
+import org.apache.spark.util.ArrayImplicits._
 
 /**
  * A rule that constructs logical writes.
@@ -41,66 +45,89 @@ object V2Writes extends Rule[LogicalPlan] with PredicateHelper {
   import DataSourceV2Implicits._
 
   override def apply(plan: LogicalPlan): LogicalPlan = plan transformDown {
-    case a @ AppendData(r: DataSourceV2Relation, query, options, _, None) =>
-      val writeBuilder = newWriteBuilder(r.table, options, query.schema)
+    case a @ AppendData(r: DataSourceV2Relation, query, options, _, None, _) =>
+      val writeOptions = mergeOptions(options, r.options.asScala.toMap)
+      val writeBuilder = newWriteBuilder(r.table, writeOptions, query.schema)
       val write = writeBuilder.build()
-      val newQuery = DistributionAndOrderingUtils.prepareQuery(write, query)
+      val newQuery = DistributionAndOrderingUtils.prepareQuery(write, query, r.funCatalog)
       a.copy(write = Some(write), query = newQuery)
 
-    case o @ OverwriteByExpression(r: DataSourceV2Relation, deleteExpr, query, options, _, None) =>
+    case o @ OverwriteByExpression(
+        r: DataSourceV2Relation, deleteExpr, query, options, _, None, _) =>
       // fail if any filter cannot be converted. correctness depends on removing all matching data.
-      val filters = splitConjunctivePredicates(deleteExpr).flatMap { pred =>
-        val filter = DataSourceStrategy.translateFilter(pred, supportNestedPredicatePushdown = true)
-        if (filter.isEmpty) {
+      val predicates = splitConjunctivePredicates(deleteExpr).flatMap { pred =>
+        val predicate = DataSourceV2Strategy.translateFilterV2(pred)
+        if (predicate.isEmpty) {
           throw QueryCompilationErrors.cannotTranslateExpressionToSourceFilterError(pred)
         }
-        filter
+        predicate
       }.toArray
 
       val table = r.table
-      val writeBuilder = newWriteBuilder(table, options, query.schema)
+      val writeOptions = mergeOptions(options, r.options.asScala.toMap)
+      val writeBuilder = newWriteBuilder(table, writeOptions, query.schema)
       val write = writeBuilder match {
-        case builder: SupportsTruncate if isTruncate(filters) =>
+        case builder: SupportsTruncate if isTruncate(predicates) =>
           builder.truncate().build()
-        case builder: SupportsOverwrite =>
-          builder.overwrite(filters).build()
+        case builder: SupportsOverwriteV2 if builder.canOverwrite(predicates) =>
+          builder.overwrite(predicates).build()
         case _ =>
           throw QueryExecutionErrors.overwriteTableByUnsupportedExpressionError(table)
       }
 
-      val newQuery = DistributionAndOrderingUtils.prepareQuery(write, query)
+      val newQuery = DistributionAndOrderingUtils.prepareQuery(write, query, r.funCatalog)
       o.copy(write = Some(write), query = newQuery)
 
     case o @ OverwritePartitionsDynamic(r: DataSourceV2Relation, query, options, _, None) =>
       val table = r.table
-      val writeBuilder = newWriteBuilder(table, options, query.schema)
+      val writeOptions = mergeOptions(options, r.options.asScala.toMap)
+      val writeBuilder = newWriteBuilder(table, writeOptions, query.schema)
       val write = writeBuilder match {
         case builder: SupportsDynamicOverwrite =>
           builder.overwriteDynamicPartitions().build()
         case _ =>
           throw QueryExecutionErrors.dynamicPartitionOverwriteUnsupportedByTableError(table)
       }
-      val newQuery = DistributionAndOrderingUtils.prepareQuery(write, query)
+      val newQuery = DistributionAndOrderingUtils.prepareQuery(write, query, r.funCatalog)
       o.copy(write = Some(write), query = newQuery)
 
     case WriteToMicroBatchDataSource(
-        relation, table, query, queryId, writeOptions, outputMode, Some(batchId)) =>
-
+        relationOpt, table, query, queryId, options, outputMode, Some(batchId)) =>
+      val writeOptions = mergeOptions(
+        options, relationOpt.map(r => r.options.asScala.toMap).getOrElse(Map.empty))
       val writeBuilder = newWriteBuilder(table, writeOptions, query.schema, queryId)
       val write = buildWriteForMicroBatch(table, writeBuilder, outputMode)
       val microBatchWrite = new MicroBatchWrite(batchId, write.toStreaming)
-      val customMetrics = write.supportedCustomMetrics.toSeq
-      val newQuery = DistributionAndOrderingUtils.prepareQuery(write, query)
-      WriteToDataSourceV2(relation, microBatchWrite, newQuery, customMetrics)
+      val customMetrics = write.supportedCustomMetrics.toImmutableArraySeq
+      val funCatalogOpt = relationOpt.flatMap(_.funCatalog)
+      val newQuery = DistributionAndOrderingUtils.prepareQuery(write, query, funCatalogOpt)
+      WriteToDataSourceV2(relationOpt, microBatchWrite, newQuery, customMetrics)
 
-    case rd @ ReplaceData(r: DataSourceV2Relation, _, query, _, None) =>
-      val rowSchema = StructType.fromAttributes(rd.dataInput)
-      val writeBuilder = newWriteBuilder(r.table, Map.empty, rowSchema)
+    case rd @ ReplaceData(r: DataSourceV2Relation, _, query, _, _, None) =>
+      val rowSchema = DataTypeUtils.fromAttributes(rd.dataInput)
+      val writeOptions = mergeOptions(Map.empty, r.options.asScala.toMap)
+      val writeBuilder = newWriteBuilder(r.table, writeOptions, rowSchema)
       val write = writeBuilder.build()
-      val newQuery = DistributionAndOrderingUtils.prepareQuery(write, query)
+      val newQuery = DistributionAndOrderingUtils.prepareQuery(write, query, r.funCatalog)
       // project away any metadata columns that could be used for distribution and ordering
       rd.copy(write = Some(write), query = Project(rd.dataInput, newQuery))
 
+    case wd @ WriteDelta(r: DataSourceV2Relation, _, query, _, projections, None) =>
+      val writeOptions = mergeOptions(Map.empty, r.options.asScala.toMap)
+      val deltaWriteBuilder = newDeltaWriteBuilder(r.table, writeOptions, projections)
+      val deltaWrite = deltaWriteBuilder.build()
+      val newQuery = DistributionAndOrderingUtils.prepareQuery(deltaWrite, query, r.funCatalog)
+      wd.copy(write = Some(deltaWrite), query = newQuery)
+  }
+
+  private def mergeOptions(
+      commandOptions: Map[String, String],
+      dsOptions: Map[String, String]): Map[String, String] = {
+    // for DataFrame API cases, same options are carried by both Command and DataSourceV2Relation
+    // for DataFrameV2 API cases, options are only carried by Command
+    // for SQL cases, options are only carried by DataSourceV2Relation
+    assert(commandOptions == dsOptions || commandOptions.isEmpty || dsOptions.isEmpty)
+    commandOptions ++ dsOptions
   }
 
   private def buildWriteForMicroBatch(
@@ -123,8 +150,8 @@ object V2Writes extends Rule[LogicalPlan] with PredicateHelper {
     }
   }
 
-  private def isTruncate(filters: Array[Filter]): Boolean = {
-    filters.length == 1 && filters(0).isInstanceOf[AlwaysTrue]
+  private def isTruncate(predicates: Array[Predicate]): Boolean = {
+    predicates.length == 1 && predicates(0).name().equals("ALWAYS_TRUE")
   }
 
   private def newWriteBuilder(
@@ -135,5 +162,27 @@ object V2Writes extends Rule[LogicalPlan] with PredicateHelper {
 
     val info = LogicalWriteInfoImpl(queryId, rowSchema, writeOptions.asOptions)
     table.asWritable.newWriteBuilder(info)
+  }
+
+  private def newDeltaWriteBuilder(
+      table: Table,
+      writeOptions: Map[String, String],
+      projections: WriteDeltaProjections,
+      queryId: String = UUID.randomUUID().toString): DeltaWriteBuilder = {
+
+    val rowSchema = projections.rowProjection.map(_.schema).getOrElse(StructType(Nil))
+    val rowIdSchema = projections.rowIdProjection.schema
+    val metadataSchema = projections.metadataProjection.map(_.schema)
+
+    val info = LogicalWriteInfoImpl(
+      queryId,
+      rowSchema,
+      writeOptions.asOptions,
+      Optional.of(rowIdSchema),
+      Optional.ofNullable(metadataSchema.orNull))
+
+    val writeBuilder = table.asWritable.newWriteBuilder(info)
+    assert(writeBuilder.isInstanceOf[DeltaWriteBuilder], s"$writeBuilder must be DeltaWriteBuilder")
+    writeBuilder.asInstanceOf[DeltaWriteBuilder]
   }
 }

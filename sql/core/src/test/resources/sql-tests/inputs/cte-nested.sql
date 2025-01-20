@@ -17,6 +17,28 @@ SELECT (
   SELECT * FROM t
 );
 
+-- un-referenced CTE in subquery expression: outer reference in CTE relation
+SELECT (
+  WITH unreferenced AS (SELECT id)
+  SELECT 1
+) FROM range(1);
+
+-- un-referenced CTE in subquery expression: outer reference in CTE main query
+SELECT (
+  WITH unreferenced AS (SELECT 1)
+  SELECT id
+) FROM range(1);
+
+-- Make sure CTE in subquery is scoped to that subquery rather than global
+-- the 2nd half of the union should fail because the cte is scoped to the first half
+SELECT * FROM
+  (
+   WITH cte AS (SELECT * FROM range(10))
+   SELECT * FROM cte WHERE id = 8
+  ) a
+UNION
+SELECT * FROM cte;
+
 -- CTE in CTE definition shadows outer
 WITH
   t AS (SELECT 1),
@@ -147,3 +169,60 @@ WITH
     SELECT * FROM t3
   )
 SELECT * FROM t2;
+
+-- CTE nested in CTE main body FROM clause references outer CTE def
+WITH cte_outer AS (
+  SELECT 1
+)
+SELECT * FROM (
+  WITH cte_inner AS (
+    SELECT * FROM cte_outer
+  )
+  SELECT * FROM cte_inner
+);
+
+-- CTE double nested in CTE main body FROM clause references outer CTE def
+WITH cte_outer AS (
+  SELECT 1
+)
+SELECT * FROM (
+  WITH cte_inner AS (
+    SELECT * FROM (
+      WITH cte_inner_inner AS (
+        SELECT * FROM cte_outer
+      )
+      SELECT * FROM cte_inner_inner
+    )
+  )
+  SELECT * FROM cte_inner
+);
+
+-- Invalid reference to invisible CTE def nested CTE def
+WITH cte_outer AS (
+  WITH cte_invisible_inner AS (
+    SELECT 1
+  )
+  SELECT * FROM cte_invisible_inner
+)
+SELECT * FROM (
+  WITH cte_inner AS (
+    SELECT * FROM cte_invisible_inner
+  )
+  SELECT * FROM cte_inner
+);
+
+-- Invalid reference to invisible CTE def nested CTE def (in FROM)
+WITH cte_outer AS (
+  SELECT * FROM (
+    WITH cte_invisible_inner AS (
+      SELECT 1
+    )
+    SELECT * FROM cte_invisible_inner
+  )
+)
+SELECT * FROM (
+  WITH cte_inner AS (
+    SELECT * FROM cte_invisible_inner
+  )
+  SELECT * FROM cte_inner
+);

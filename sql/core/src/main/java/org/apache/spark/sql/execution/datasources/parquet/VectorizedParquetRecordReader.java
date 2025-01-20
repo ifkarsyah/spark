@@ -23,13 +23,18 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import scala.collection.JavaConverters;
+
+import org.apache.spark.SparkUnsupportedOperationException;
+import org.apache.spark.sql.catalyst.util.ResolveDefaultColumns;
+import scala.Option;
+import scala.jdk.javaapi.CollectionConverters;
 
 import com.google.common.annotations.VisibleForTesting;
 import org.apache.hadoop.mapreduce.InputSplit;
 import org.apache.hadoop.mapreduce.TaskAttemptContext;
 import org.apache.parquet.column.ColumnDescriptor;
 import org.apache.parquet.column.page.PageReadStore;
+import org.apache.parquet.hadoop.metadata.ParquetMetadata;
 import org.apache.parquet.schema.GroupType;
 import org.apache.parquet.schema.MessageType;
 import org.apache.parquet.schema.Type;
@@ -133,6 +138,11 @@ public class VectorizedParquetRecordReader extends SpecificParquetRecordReaderBa
   private boolean returnColumnarBatch;
 
   /**
+   * Populates the row index column if needed.
+   */
+  private ParquetRowIndexUtil.RowIndexGenerator rowIndexGenerator = null;
+
+  /**
    * The memory mode of the columnarBatch
    */
   private final MemoryMode MEMORY_MODE;
@@ -173,6 +183,16 @@ public class VectorizedParquetRecordReader extends SpecificParquetRecordReaderBa
   public void initialize(InputSplit inputSplit, TaskAttemptContext taskAttemptContext)
       throws IOException, InterruptedException, UnsupportedOperationException {
     super.initialize(inputSplit, taskAttemptContext);
+    initializeInternal();
+  }
+
+  @Override
+  public void initialize(
+      InputSplit inputSplit,
+      TaskAttemptContext taskAttemptContext,
+      Option<ParquetMetadata> fileFooter)
+      throws IOException, InterruptedException, UnsupportedOperationException {
+    super.initialize(inputSplit, taskAttemptContext, fileFooter);
     initializeInternal();
   }
 
@@ -241,10 +261,8 @@ public class VectorizedParquetRecordReader extends SpecificParquetRecordReaderBa
       MemoryMode memMode,
       StructType partitionColumns,
       InternalRow partitionValues) {
-    StructType batchSchema = new StructType();
-    for (StructField f: sparkSchema.fields()) {
-      batchSchema = batchSchema.add(f);
-    }
+    StructType batchSchema = new StructType(sparkSchema.fields());
+
     int constantColumnLength = 0;
     if (partitionColumns != null) {
       for (StructField f : partitionColumns.fields()) {
@@ -262,7 +280,7 @@ public class VectorizedParquetRecordReader extends SpecificParquetRecordReaderBa
     for (int i = 0; i < columnVectors.length; i++) {
       Object defaultValue = null;
       if (sparkRequestedSchema != null) {
-        defaultValue = sparkRequestedSchema.existenceDefaultValues()[i];
+        defaultValue = ResolveDefaultColumns.existenceDefaultValues(sparkRequestedSchema)[i];
       }
       columnVectors[i] = new ParquetColumnVector(parquetColumn.children().apply(i),
         (WritableColumnVector) vectors[i], capacity, memMode, missingColumns, true, defaultValue);
@@ -275,6 +293,8 @@ public class VectorizedParquetRecordReader extends SpecificParquetRecordReaderBa
           (ConstantColumnVector) vectors[i + partitionIdx], partitionValues, i);
       }
     }
+
+    rowIndexGenerator = ParquetRowIndexUtil.createGeneratorIfNeeded(sparkSchema);
   }
 
   private void initBatch() {
@@ -324,6 +344,10 @@ public class VectorizedParquetRecordReader extends SpecificParquetRecordReaderBa
       }
       cv.assemble();
     }
+    // If needed, compute row indexes within a file.
+    if (rowIndexGenerator != null) {
+      rowIndexGenerator.populateRowIndex(columnVectors, num);
+    }
 
     rowsReturned += num;
     columnarBatch.setNumRows(num);
@@ -334,7 +358,7 @@ public class VectorizedParquetRecordReader extends SpecificParquetRecordReaderBa
 
   private void initializeInternal() throws IOException, UnsupportedOperationException {
     missingColumns = new HashSet<>();
-    for (ParquetColumn column : JavaConverters.seqAsJavaList(parquetColumn.children())) {
+    for (ParquetColumn column : CollectionConverters.asJava(parquetColumn.children())) {
       checkColumn(column);
     }
   }
@@ -344,16 +368,16 @@ public class VectorizedParquetRecordReader extends SpecificParquetRecordReaderBa
    * conforms to the type of the file schema.
    */
   private void checkColumn(ParquetColumn column) throws IOException {
-    String[] path = JavaConverters.seqAsJavaList(column.path()).toArray(new String[0]);
+    String[] path = CollectionConverters.asJava(column.path()).toArray(new String[0]);
     if (containsPath(fileSchema, path)) {
       if (column.isPrimitive()) {
         ColumnDescriptor desc = column.descriptor().get();
         ColumnDescriptor fd = fileSchema.getColumnDescription(desc.getPath());
         if (!fd.equals(desc)) {
-          throw new UnsupportedOperationException("Schema evolution not supported.");
+          throw new SparkUnsupportedOperationException("_LEGACY_ERROR_TEMP_3185");
         }
       } else {
-        for (ParquetColumn childColumn : JavaConverters.seqAsJavaList(column.children())) {
+        for (ParquetColumn childColumn : CollectionConverters.asJava(column.children())) {
           checkColumn(childColumn);
         }
       }
@@ -378,9 +402,8 @@ public class VectorizedParquetRecordReader extends SpecificParquetRecordReaderBa
 
   private boolean containsPath(Type parquetType, String[] path, int depth) {
     if (path.length == depth) return true;
-    if (parquetType instanceof GroupType) {
+    if (parquetType instanceof GroupType parquetGroupType) {
       String fieldName = path[depth];
-      GroupType parquetGroupType = (GroupType) parquetType;
       if (parquetGroupType.containsField(fieldName)) {
         return containsPath(parquetGroupType.getType(fieldName), path, depth + 1);
       }
@@ -394,6 +417,9 @@ public class VectorizedParquetRecordReader extends SpecificParquetRecordReaderBa
     if (pages == null) {
       throw new IOException("expecting more rows but reached last block. Read "
           + rowsReturned + " out of " + totalRowCount);
+    }
+    if (rowIndexGenerator != null) {
+      rowIndexGenerator.initFromPageReadStore(pages);
     }
     for (ParquetColumnVector cv : columnVectors) {
       initColumnReader(pages, cv);
